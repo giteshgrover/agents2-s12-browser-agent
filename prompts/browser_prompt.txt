@@ -25,7 +25,7 @@ The plan will be automatically executed by the system after you generate it.
 You are starting a new browser automation task. Your job is to:
 1. **Open a new tab** (if needed) and navigate to the target URL
 2. **Gather page elements** to understand what's available on the page
-3. **Extract page state** (snapshot, interactive elements, content) for planning
+3. **Extract page state** (interactive elements, content) for planning
 
 You are given:
 - `"original_query"` (string) - the user's original request
@@ -52,10 +52,6 @@ You must return:
     {
       "tool": "get_interactive_elements",
       "arguments": {}
-    },
-    {
-      "tool": "get_page_snapshot",
-      "arguments": {}
     }
   ],
   "status": "success",
@@ -68,13 +64,12 @@ You must return:
 - **Extract URL from query/perception**: Look for URLs in `original_query`, `perception.entities`, or `perception.result_requirement`
 - **If no URL specified**: Use `search_google` to find relevant pages, then navigate
 - **Gather elements**: Always include `get_interactive_elements` to see what can be clicked/input
-- **Get page state**: Include `get_page_snapshot` or `extract_content` to understand page content
 - **Wait for load**: Include `wait` after navigation (typically 2-3 seconds)
-- **Plan length**: Initial mode should have 4-6 steps (navigate, wait, gather elements, get snapshot)
+- **Plan length**: Initial mode should have 3-6 steps (navigate, wait, gather elements)
 
 ### Mode: `"interactive"`
 
-You have already gathered page elements and page state from a previous browser execution. Your job is to:
+You have already gathered page elements from a previous browser execution. Your job is to:
 1. **Analyze available elements** from previous browser results in `globals_schema`
 2. **Plan specific interactions** based on the query requirements
 3. **Execute actions** to fulfill the user's request
@@ -86,7 +81,6 @@ You are given:
 - `"globals_schema"` (dict) - **contains previous browser execution results**:
   - `browser_result_*` - previous browser execution results
   - `page_elements_*` - interactive elements from the page
-  - `page_snapshot_*` - page snapshot data
   - Other variables from completed steps
 - `"completed_steps"` - list of completed browser steps
 - `"failed_steps"` - list of failed browser steps
@@ -107,16 +101,6 @@ You must return:
         "index": 2,
         "text": "user input value"
       }
-    },
-    {
-      "tool": "wait",
-      "arguments": {
-        "seconds": 2
-      }
-    },
-    {
-      "tool": "get_page_snapshot",
-      "arguments": {}
     }
   ],
   "status": "success",
@@ -125,7 +109,7 @@ You must return:
 ```
 
 **Interactive Mode Rules:**
-- **Use previous data**: Check `globals_schema` for `browser_result_*`, `page_elements_*`, or `page_snapshot_*` keys
+- **Use previous data**: Check `globals_schema` for `browser_result_*`, `page_elements_*` keys
 - **Match elements to task**: Identify which interactive elements (buttons, inputs, links) match the query requirements
 - **Plan specific actions**: Use concrete element indices and values based on gathered data
 - **Verify results**: Include steps to verify success (get_page_snapshot, extract_content, etc.)
@@ -187,8 +171,8 @@ You must return:
 3. **Mode-Specific Patterns**:
    
    **Initial Mode:**
-   - Navigate → Wait → Get Elements → Get Snapshot
-   - If URL not provided: Search → Navigate → Wait → Get Elements → Get Snapshot
+   - Navigate → Wait → Get Elements
+   - If URL not provided: Search → Navigate → Wait → Get Elements
    
    **Interactive Mode:**
    - Analyze previous results → Plan interactions → Execute → Verify
@@ -199,12 +183,12 @@ You must return:
    - **Navigate**: Use `go_to_url` or `open_tab` to start
    - **Search**: Use `search_google` for web searches
    - **Interact**: Use `click_element_by_index`, `input_text`, `select_dropdown_option` for interactions
-   - **Extract**: Use `get_page_snapshot`, `get_interactive_elements`, `extract_content` to get information
+   - **Extract**: `get_interactive_elements` to get information
    - **Wait**: Use `wait` if pages need time to load (typically 2-3 seconds after navigation)
 
 5. **Error Handling**:
    - Plan should be robust - include steps to verify success
-   - Consider using `get_page_snapshot` or `get_interactive_elements` to check page state
+   - Consider using  `get_interactive_elements` to check page state
    - If navigation is needed, ensure you navigate before trying to interact
 
 6. **Status Prediction**:
@@ -248,16 +232,6 @@ You must return:
     {
       "tool": "get_interactive_elements",
       "arguments": {}
-    },
-    {
-      "tool": "get_page_snapshot",
-      "arguments": {}
-    },
-    {
-      "tool": "extract_content",
-      "arguments": {
-        "format": "markdown"
-      }
     }
   ],
   "status": "success",
@@ -303,10 +277,6 @@ You must return:
     },
     {
       "tool": "get_interactive_elements",
-      "arguments": {}
-    },
-    {
-      "tool": "get_page_snapshot",
       "arguments": {}
     }
   ],
@@ -368,10 +338,6 @@ You must return:
       "arguments": {
         "seconds": 2
       }
-    },
-    {
-      "tool": "get_page_snapshot",
-      "arguments": {}
     }
   ],
   "status": "success",
@@ -414,20 +380,10 @@ You must return:
       "arguments": {
         "seconds": 2
       }
-    },
-    {
-      "tool": "get_page_snapshot",
-      "arguments": {}
-    },
-    {
-      "tool": "extract_content",
-      "arguments": {
-        "format": "markdown"
-      }
     }
   ],
   "status": "success",
-  "result": "Will click the About link, wait for navigation, and extract the About page content"
+  "result": "Will click the About link, wait for navigation"
 }
 ```
 
