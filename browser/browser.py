@@ -19,23 +19,15 @@ class Browser:
         self.browser_prompt_path = browser_prompt_path
         self.multi_mcp = multi_mcp
         self.model = ModelManager()
+        self.max_iterations = 5  # Maximum number of browser agent calls
 
     async def run(self, browser_input: dict, session: Optional[AgentSession] = None) -> dict:
         """
-        Generate and execute browser automation plans.
-        Handles both initial (gather page info) and interactive (execute actions) modes internally.
+        Generate and execute browser automation plans iteratively.
+        Uses next_action field to determine if more calls are needed.
         Returns a dict with 'status' ('success' or 'failure') and 'result' or 'error'.
         """
-        # Check if we have previous browser data to determine if we need initial mode
-        globals_schema = browser_input.get("globals_schema", {})
-        has_previous_browser_data = any(
-            key.startswith("browser_result_") or 
-            key.startswith("page_elements_") or 
-            key.startswith("page_snapshot_")
-            for key in globals_schema.keys()
-        )
-        
-        # Get browser tools once (used for both modes)
+        # Get browser tools once (used for all iterations)
         browser_tools = self._get_browser_tools()
         if not browser_tools:
             return {
@@ -47,73 +39,131 @@ class Browser:
         
         tool_descriptions = self._format_tool_descriptions(browser_tools)
         
-        # Step 1: Run initial mode if we don't have previous browser data
-        initial_result = None
-        if not has_previous_browser_data:
-            log_step("[BROWSER AGENT: Running INITIAL mode to gather page information...]", symbol="→")
-            initial_result = await self._run_mode(
+        # Accumulate all plans and execution details across iterations
+        all_plans = []
+        all_execution_details = []
+        all_iteration_results = []
+        page_elements = None
+        
+        iteration = 0
+        next_action = "CALL_AGAIN"  # Start by calling the agent
+        
+        while next_action == "CALL_AGAIN" and iteration < self.max_iterations:
+            iteration += 1
+            is_initial_mode = (iteration == 1)  # First iteration is initial mode
+            log_step(f"[BROWSER AGENT: Iteration {iteration}/{self.max_iterations} ({'INITIAL' if is_initial_mode else 'INTERACTIVE'} mode)...]", symbol="→")
+            
+            # Call LLM to get plan
+            llm_result = await self._call_llm(
                 browser_input=browser_input,
-                mode="initial",
                 tool_descriptions=tool_descriptions,
-                session=session
+                session=session,
+                iteration=iteration,
+                is_initial_mode=is_initial_mode
             )
             
-            if initial_result.get("status") != "success":
-                log_error("❌ Initial mode failed. Cannot proceed to interactive mode.")
-                return initial_result
-            
-            # Update browser_input with initial mode results for interactive mode
-            # Format them the same way as other globals_schema entries
-            page_elements = initial_result.get("page_elements")
-            page_snapshot = None # initial_result.get("page_snapshot")
-            
-            if page_elements:
-                # For page_elements, try to format as JSON for better readability
-                try:
-                    elements_preview = json.dumps(page_elements, indent=2)[:2000] + ("…" if len(json.dumps(page_elements)) > 2000 else "")
-                except:
-                    elements_preview = str(page_elements)[:2000] + ("…" if len(str(page_elements)) > 2000 else "")
-                browser_input["globals_schema"][f"page_elements_initial"] = {
-                    "type": type(page_elements).__name__,
-                    "preview": elements_preview
+            if llm_result.get("status") == "failure":
+                log_error(f"❌ Browser agent LLM call failed at iteration {iteration}")
+                return {
+                    "status": "failure",
+                    "error": llm_result.get("error", "LLM call failed"),
+                    "plan": all_plans,
+                    "execution_details": all_execution_details,
+                    "iterations": iteration
                 }
-            if page_snapshot:
-                browser_input["globals_schema"][f"page_snapshot_initial"] = {
-                    "type": type(page_snapshot).__name__,
-                    "preview": str(page_snapshot)[:1000] + ("…" if len(str(page_snapshot)) > 1000 else "")
-                }
-            browser_input["globals_schema"][f"browser_result_initial"] = {
-                "type": type(initial_result).__name__,
-                "preview": str(initial_result)[:500] + ("…" if len(str(initial_result)) > 500 else "")
+            
+            plan = llm_result.get("plan", [])
+            next_action = llm_result.get("next_action", "DONE")
+            pdb.set_trace()
+            
+            if not plan:
+                log_error(f"⚠️ Empty plan returned at iteration {iteration}")
+                next_action = "DONE"  # Stop if no plan
+                continue
+            
+            all_plans.extend(plan)
+            
+            # Execute the plan
+            execution_result = await self._execute_plan(plan, session)
+            all_execution_details.extend(execution_result.get("execution_details", []))
+            
+            # Store iteration result
+            iteration_result = {
+                "iteration": iteration,
+                "plan": plan,
+                "execution_details": execution_result.get("execution_details", []),
+                "status": execution_result.get("status", "failure"),
+                "next_action": next_action
             }
+            all_iteration_results.append(iteration_result)
             
-            log_step("[BROWSER AGENT: Initial mode completed. Proceeding to INTERACTIVE mode...]", symbol="→")
+            # Update page_elements if we got new ones
+            if execution_result.get("page_elements"):
+                page_elements = execution_result.get("page_elements")
+            
+            # If execution failed, stop
+            if execution_result.get("status") != "success":
+                log_error(f"❌ Plan execution failed at iteration {iteration}")
+                return {
+                    "status": "failure",
+                    "error": execution_result.get("error", "Plan execution failed"),
+                    "plan": all_plans,
+                    "execution_details": all_execution_details,
+                    "iterations": iteration,
+                    "iteration_results": all_iteration_results
+                }
+            
+            # If next_action is CALL_AGAIN, update browser_input with execution results
+            if next_action == "CALL_AGAIN":
+                # Add execution results to globals_schema for next iteration
+                result_key = f"browser_result_iteration_{iteration}"
+                browser_input["globals_schema"][result_key] = {
+                    "type": type(execution_result).__name__,
+                    "preview": str(execution_result)[:500] + ("…" if len(str(execution_result)) > 500 else "")
+                }
+                
+                # Add page elements if we have them
+                if page_elements:
+                    elements_key = f"page_elements_iteration_{iteration}"
+                    try:
+                        elements_preview = json.dumps(page_elements, indent=2)[:2000] + ("…" if len(json.dumps(page_elements)) > 2000 else "")
+                    except:
+                        elements_preview = str(page_elements)[:2000] + ("…" if len(str(page_elements)) > 2000 else "")
+                    browser_input["globals_schema"][elements_key] = {
+                        "type": type(page_elements).__name__,
+                        "preview": elements_preview
+                    }
+                
+                log_step(f"[BROWSER AGENT: Iteration {iteration} completed. Continuing with next iteration...]", symbol="→")
+            else:
+                log_step(f"[BROWSER AGENT: Iteration {iteration} completed. Task DONE.]", symbol="✅")
         
-        pdb.set_trace()
-        # Step 2: Run interactive mode to execute actions
-        interactive_result = await self._run_mode(
-            browser_input=browser_input,
-            mode="interactive",
-            tool_descriptions=tool_descriptions,
-            session=session
-        )
+        # Check if we hit max iterations
+        if iteration >= self.max_iterations and next_action == "CALL_AGAIN":
+            log_error(f"⚠️ Reached maximum iterations ({self.max_iterations}). Stopping.")
+            return {
+                "status": "failure",
+                "error": f"Reached maximum iterations ({self.max_iterations})",
+                "plan": all_plans,
+                "execution_details": all_execution_details,
+                "iterations": iteration,
+                "iteration_results": all_iteration_results
+            }
         
-        # Combine results
-        final_result = {
-            "status": interactive_result.get("status", "failure"),
-            "result": interactive_result.get("result"),
-            "error": interactive_result.get("error"),
-            "plan": interactive_result.get("plan", []),
-            "execution_details": interactive_result.get("execution_details", []),
-            "initial_mode_result": initial_result if initial_result else None,
-            "interactive_mode_result": interactive_result
+        # Determine final status
+        all_success = all(result.get("status") == "success" for result in all_iteration_results)
+        final_status = "success" if all_success else "failure"
+        
+        return {
+            "status": final_status,
+            "result": all_iteration_results[-1].get("execution_details", [{}])[-1].get("result") if all_iteration_results else None,
+            "error": None if all_success else "One or more iterations failed",
+            "plan": all_plans,
+            "execution_details": all_execution_details,
+            "iterations": iteration,
+            "iteration_results": all_iteration_results,
+            "page_elements": page_elements
         }
-        
-        # Include page elements and snapshot from either initial or interactive mode
-        final_result["page_elements"] = interactive_result.get("page_elements") or (initial_result.get("page_elements") if initial_result else None)
-        final_result["page_snapshot"] = interactive_result.get("page_snapshot") or (initial_result.get("page_snapshot") if initial_result else None)
-        
-        return final_result
 
     def _get_browser_tools(self):
         """Get browser MCP tools from webbrowsing server."""
@@ -147,61 +197,67 @@ class Browser:
         
         return "\n".join(browser_tool_descriptions)
 
-    async def _run_mode(self, browser_input: dict, mode: str, tool_descriptions: str, session: Optional[AgentSession] = None) -> dict:
+    async def _call_llm(self, browser_input: dict, tool_descriptions: str, session: Optional[AgentSession] = None, iteration: int = 1, is_initial_mode: bool = True) -> dict:
         """
-        Run browser agent in a specific mode (initial or interactive).
+        Call LLM to get browser automation plan.
+        
+        Args:
+            browser_input: Input dictionary for browser agent
+            tool_descriptions: Formatted tool descriptions
+            session: Optional agent session
+            iteration: Current iteration number
+            is_initial_mode: True if this is the first iteration (initial mode), False otherwise
         """
         prompt_template = Path(self.browser_prompt_path).read_text(encoding="utf-8")
         
-        # Create mode-specific input
+        # Add mode information to browser_input
         mode_input = browser_input.copy()
-        mode_input["browser_mode"] = mode
+        mode_input["is_initial_mode"] = is_initial_mode
+        mode_input["iteration"] = iteration
         
         tool_descriptions_formatted = "\n\n### Available Browser Tools\n\n---\n\n" + tool_descriptions
         full_prompt = f"{prompt_template.strip()}\n{tool_descriptions_formatted}\n\n```json\n{json.dumps(mode_input, indent=2)}\n```"
 
         try:
-            log_step(f"[SENDING PROMPT TO BROWSER AGENT ({mode.upper()} mode)...]", symbol="→")
+            log_step(f"[SENDING PROMPT TO BROWSER AGENT (Iteration {iteration})...]", symbol="→")
             time.sleep(2)
             response = await self.model.generate_text(
                 prompt=full_prompt
             )
-            log_step(f"[RECEIVED OUTPUT FROM BROWSER AGENT ({mode.upper()} mode)...]", symbol="←")
+            log_step(f"[RECEIVED OUTPUT FROM BROWSER AGENT (Iteration {iteration})...]", symbol="←")
 
-            output = parse_llm_json(response, required_keys=["plan", "status", "result"])
-
-            # Execute the plan
-            execution_result = await self._execute_plan(output.get("plan", []), session)
-
+            output = parse_llm_json(response, required_keys=["plan", "status", "result", "next_action"])
+            
+            # Validate next_action
+            next_action = output.get("next_action", "DONE")
+            if next_action not in ["DONE", "CALL_AGAIN"]:
+                log_error(f"⚠️ Invalid next_action: {next_action}. Defaulting to DONE.")
+                next_action = "DONE"
+            
             return {
-                "status": execution_result.get("status", "failure"),
-                "result": execution_result.get("result"),
-                "error": execution_result.get("error"),
+                "status": "success",
                 "plan": output.get("plan", []),
-                "execution_details": execution_result.get("execution_details", []),
-                "mode": mode,
-                "page_elements": execution_result.get("page_elements"),
-                "page_snapshot": execution_result.get("page_snapshot")
+                "status_prediction": output.get("status", "success"),
+                "result": output.get("result", ""),
+                "next_action": next_action
             }
 
         except ServerError as e:
-            log_error(f"🚫 BROWSER AGENT LLM ServerError ({mode} mode): {e}")
+            log_error(f"🚫 BROWSER AGENT LLM ServerError (Iteration {iteration}): {e}")
             return {
                 "status": "failure",
-                "error": f"Browser agent ServerError ({mode} mode): LLM unavailable - {str(e)}",
+                "error": f"Browser agent ServerError (Iteration {iteration}): LLM unavailable - {str(e)}",
                 "plan": [],
-                "execution_details": [],
-                "mode": mode
+                "next_action": "DONE"
             }
 
         except Exception as e:
-            log_error(f"🛑 BROWSER AGENT ERROR ({mode} mode): {str(e)}")
+            log_error(f"🛑 BROWSER AGENT ERROR (Iteration {iteration}): {str(e)}")
             return {
                 "status": "failure",
-                "error": f"Browser agent failed ({mode} mode): {str(e)}",
+                "error": f"Browser agent failed (Iteration {iteration}): {str(e)}",
                 "plan": [],
-                "execution_details": [],
-                "mode": mode
+                "next_action": "DONE"
             }
 
     async def _execute_plan(self, plan: list, session: Optional[AgentSession] = None) -> dict:
@@ -219,7 +275,6 @@ class Browser:
         execution_details = []
         last_result = None
         page_elements = None
-        page_snapshot = None
 
         for i, step in enumerate(plan):
             tool_name = step.get("tool")
@@ -249,11 +304,9 @@ class Browser:
                 else:
                     last_result = result
 
-                # Store specific results for easier access in interactive mode
+                # Store specific results for easier access in next iteration
                 if tool_name == "get_interactive_elements":
                     page_elements = last_result
-                elif tool_name in ["get_page_snapshot", "extract_content"]:
-                    page_snapshot = last_result
 
                 execution_details.append({
                     "step": i + 1,
@@ -274,10 +327,6 @@ class Browser:
                     "error": error_msg
                 })
                 log_error(f"❌ Tool {tool_name} failed: {error_msg}")
-                
-                # Decide whether to continue or stop on error
-                # For now, we'll continue but mark as failure if any step fails
-                # You can modify this logic based on requirements
 
         # Determine overall status
         all_success = all(detail.get("status") == "success" for detail in execution_details)
@@ -287,15 +336,14 @@ class Browser:
             "result": last_result,
             "error": None if all_success else "One or more steps failed",
             "execution_details": execution_details,
-            "page_elements": page_elements,  # Store for interactive mode
-            "page_snapshot": page_snapshot     # Store for interactive mode
+            "page_elements": page_elements
         }
 
 
 def build_browser_input(ctx, query, p_out):
     """
     Build input for browser agent similar to decision input.
-    Mode selection (initial vs interactive) is handled internally by the browser agent.
+    The browser agent handles iterative calls internally using next_action.
     """
     return {
         "current_time": datetime.utcnow().isoformat(),
@@ -310,4 +358,3 @@ def build_browser_input(ctx, query, p_out):
             } for k, v in ctx.globals.items()
         }
     }
-
