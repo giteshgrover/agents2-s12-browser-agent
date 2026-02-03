@@ -4,15 +4,18 @@ from datetime import datetime
 from perception.perception import Perception, build_perception_input
 from decision.decision import Decision, build_decision_input
 from summarization.summarizer import Summarizer
+from browser.browser import Browser, build_browser_input
 from agent.contextManager import ContextManager
 from agent.agentSession import AgentSession
 from memory.memory_search import MemorySearch
 from action.execute_step import execute_step_with_mode
 from utils.utils import log_step, log_error, save_final_plan, log_json_block
+import pdb
 
 class Route:
     SUMMARIZE = "summarize"
     DECISION = "decision"
+    BROWSE = "browse"
 
 class StepType:
     ROOT = "ROOT"
@@ -20,27 +23,53 @@ class StepType:
 
 
 class AgentLoop:
-    def __init__(self, perception_prompt, decision_prompt, summarizer_prompt, multi_mcp, strategy="exploratory"):
+    def __init__(self, perception_prompt, decision_prompt, summarizer_prompt, browser_prompt, multi_mcp, strategy="exploratory"):
         self.perception = Perception(perception_prompt)
         self.decision = Decision(decision_prompt, multi_mcp)
         self.summarizer = Summarizer(summarizer_prompt)
+        self.browser = Browser(browser_prompt, multi_mcp)
         self.multi_mcp = multi_mcp
         self.strategy = strategy
         self.status: str = "in_progress"
 
     async def run(self, query: str):
-        self._initialize_session(query)
+        self._initialize_session(query) # new session per query
         await self._run_initial_perception()
 
         if self._should_early_exit():
             return await self._summarize()
 
-        # ✅ Missing early exit guard added
-        if self.p_out.get("route") != Route.DECISION:
+        route = self.p_out.get("route")
+        if route == Route.DECISION:
+            await self._run_decision_loop()
+        elif route == Route.BROWSE:
+            await self._run_browse_loop()
+            # After browse, check perception again to determine next step
+            p_input = build_perception_input(self.query, self.memory, self.ctx, snapshot_type="step_result")
+            self.p_out = await self.perception.run(p_input, session=self.session)
+            self.ctx.attach_perception(StepType.ROOT, self.p_out)
+            log_json_block('📌 Perception output after browse', self.p_out)
+            
+            if self.p_out.get("original_goal_achieved") or self.p_out.get("route") == Route.SUMMARIZE:
+                self.status = "success"
+                self.final_output = await self._summarize()
+            elif self.p_out.get("route") == Route.DECISION:
+                await self._run_decision_loop()
+            elif self.p_out.get("route") == Route.BROWSE:
+                # Could continue browsing if needed
+                await self._run_browse_loop()
+                # Check perception again
+                p_input = build_perception_input(self.query, self.memory, self.ctx, snapshot_type="step_result")
+                self.p_out = await self.perception.run(p_input, session=self.session)
+                if self.p_out.get("original_goal_achieved") or self.p_out.get("route") == Route.SUMMARIZE:
+                    self.status = "success"
+                    self.final_output = await self._summarize()
+            else:
+                log_error("🚩 Invalid route from perception after browse. Exiting.")
+                return "Summary generation failed."
+        else:
             log_error("🚩 Invalid perception route. Exiting.")
             return "Summary generation failed."
-
-        await self._run_decision_loop()
 
         if self.status == "success":
             return self.final_output
@@ -48,15 +77,16 @@ class AgentLoop:
         return await self._handle_failure()
 
     def _initialize_session(self, query):
-        self.session_id = str(uuid.uuid4())
+        self.session_id = str(uuid.uuid4())  # This session is different than MCP session.
         self.ctx = ContextManager(self.session_id, query)
-        self.session = AgentSession(self.session_id, query)
+        self.session = AgentSession(self.session_id, query) # new session per query
         self.query = query
-        self.memory = MemorySearch().search_memory(query)
+        self.memory = MemorySearch().search_memory(query) # TODO GG: need to understand
         self.ctx.globals = {"memory": self.memory}
 
     async def _run_initial_perception(self):
         p_input = build_perception_input(self.query, self.memory, self.ctx)
+        # pdb.set_trace()
         self.p_out = await self.perception.run(p_input, session=self.session)
 
         self.ctx.add_step(step_id=StepType.ROOT, description="initial query", step_type=StepType.ROOT)
@@ -90,10 +120,37 @@ class AgentLoop:
                 step_id=node["id"],
                 description=node["description"],
                 step_type=StepType.CODE,
-                from_node=StepType.ROOT
+                from_node=StepType.ROOT      # TODO GG: Why from_node is hardcoded and not decided based on d_out["plan_graph"]["edges"] ?
             )
 
         await self._execute_steps_loop()
+
+    async def _run_browse_loop(self):
+        """Executes browser agent to generate and execute browser automation plan."""
+        b_input = build_browser_input(self.ctx, self.query, self.p_out)
+        b_out = await self.browser.run(b_input, session=self.session)
+
+        log_json_block("📌 Browser Agent Output", b_out)
+
+        # Create a step for browser execution
+        latest_node = self.ctx.get_latest_node() or StepType.ROOT
+        browser_step_id = f"browse_{latest_node}"
+        self.ctx.add_step(
+            step_id=browser_step_id,
+            description="Browser automation execution",
+            step_type=StepType.CODE,
+            from_node=latest_node
+        )
+
+        # Store browser result in context
+        browser_result_key = f"browser_result_{browser_step_id}"
+        self.ctx.globals[browser_result_key] = b_out
+
+        if b_out.get("status") == "success":
+            self.ctx.mark_step_completed(browser_step_id)
+            self.ctx.update_step_result(browser_step_id, b_out.get("result"))
+        else:
+            self.ctx.mark_step_failed(browser_step_id, b_out.get("error", "Browser execution failed"))
 
     async def _execute_steps_loop(self):
         tracker = StepExecutionTracker(max_steps=12, max_retries=5)
@@ -109,6 +166,7 @@ class AgentLoop:
                 continue
 
             retry_step_id = tracker.retry_step_id(self.next_step_id)
+            pdb.set_trace()
             success = await execute_step_with_mode(
                 retry_step_id,
                 self.code_variants,
@@ -116,7 +174,7 @@ class AgentLoop:
                 AUTO_EXECUTION_MODE,
                 self.session,
                 self.multi_mcp
-            )
+            ) # TODO GG: need to understand
 
             if not success:
                 self.ctx.mark_step_failed(self.next_step_id, "All fallback variants failed")
@@ -147,7 +205,25 @@ class AgentLoop:
                 self.final_output = await self._summarize()
                 return
 
-            if self.p_out.get("route") != Route.DECISION:
+            route = self.p_out.get("route")
+            if route == Route.BROWSE:
+                await self._run_browse_loop()
+                # After browse, check perception again
+                p_input = build_perception_input(self.query, self.memory, self.ctx, snapshot_type="step_result")
+                self.p_out = await self.perception.run(p_input, session=self.session)
+                self.ctx.attach_perception(self.next_step_id, self.p_out)
+                log_json_block(f"📌 Perception output after browse ({self.next_step_id})", self.p_out)
+                
+                if self.p_out.get("original_goal_achieved") or self.p_out.get("route") == Route.SUMMARIZE:
+                    self.status = "success"
+                    self.final_output = await self._summarize()
+                    return
+                
+                if self.p_out.get("route") != Route.DECISION:
+                    log_error("🚩 Invalid route from perception after browse. Exiting.")
+                    return
+                # Continue to decision if route is DECISION
+            elif route != Route.DECISION:
                 log_error("🚩 Invalid route from perception. Exiting.")
                 return
 

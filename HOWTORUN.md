@@ -11,3 +11,4 @@ Check:
 Missing Steps:
 - Add missing library using "uv add xyz"
 - uv run python -m spacy download en_core_web_sm (Note 'uv add pip' needed for me first)
+- uv run playwright install chromium

@@ -110,7 +110,7 @@ def build_decision_input(ctx, query, p_out, strategy):
         "planning_strategy": strategy,
         "original_query": query,
         "perception": p_out,
-        "plan_graph": {},  # initially empty
+        "plan_graph": {},  # initially empty # TODO GG: Why this is always passed in empty??
         "completed_steps": [ctx.graph.nodes[n]["data"].__dict__ for n in ctx.graph.nodes if ctx.graph.nodes[n]["data"].status == "completed"],
         "failed_steps": [ctx.graph.nodes[n]["data"].__dict__ for n in ctx.failed_nodes],
         "globals_schema": {
