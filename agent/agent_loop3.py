@@ -155,7 +155,14 @@ class AgentLoop:
 
         if b_out.get("status") == "success":
             self.ctx.mark_step_completed(browser_step_id)
-            self.ctx.update_step_result(browser_step_id, b_out.get("result"))
+            # update_step_result expects a dict (it calls _update_globals which iterates with .items())
+            # Browser agent returns result as string, so wrap it in a dict
+            browser_result = b_out.get("result")
+            if isinstance(browser_result, dict):
+                result_dict = browser_result
+            else:
+                result_dict = {"browser_result": browser_result}
+            self.ctx.update_step_result(browser_step_id, result_dict)
         else:
             self.ctx.mark_step_failed(browser_step_id, b_out.get("error", "Browser execution failed"))
 

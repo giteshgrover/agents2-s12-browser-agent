@@ -74,7 +74,15 @@ class Browser:
             
             plan = llm_result.get("plan", [])
             next_action = llm_result.get("next_action", "DONE")
-            pdb.set_trace()
+            
+            # Validate plan - check for navigation tools in non-initial mode
+            if not is_initial_mode:
+                navigation_tools = ["open_tab", "go_to_url"]
+                plan_tools = [step.get("tool") for step in plan if step.get("tool")]
+                has_navigation = any(tool in navigation_tools for tool in plan_tools)
+                if has_navigation:
+                    log_error(f"⚠️ Navigation tools (open_tab/go_to_url) found in non-initial mode iteration {iteration}. Removing them.")
+                    plan = [step for step in plan if step.get("tool") not in navigation_tools]
             
             if not plan:
                 log_error(f"⚠️ Empty plan returned at iteration {iteration}")
@@ -83,6 +91,7 @@ class Browser:
             
             all_plans.extend(plan)
             
+            pdb.set_trace()
             # Execute the plan
             execution_result = await self._execute_plan(plan, session)
             all_execution_details.extend(execution_result.get("execution_details", []))
