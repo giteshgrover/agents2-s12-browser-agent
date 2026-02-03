@@ -126,7 +126,9 @@ class AgentLoop:
         await self._execute_steps_loop()
 
     async def _run_browse_loop(self):
-        """Executes browser agent to generate and execute browser automation plan."""
+        """Executes browser agent to generate and execute browser automation plan.
+        The browser agent handles initial and interactive modes internally.
+        """
         b_input = build_browser_input(self.ctx, self.query, self.p_out)
         b_out = await self.browser.run(b_input, session=self.session)
 
@@ -145,6 +147,15 @@ class AgentLoop:
         # Store browser result in context
         browser_result_key = f"browser_result_{browser_step_id}"
         self.ctx.globals[browser_result_key] = b_out
+        
+        # TODO Store page elements and snapshot separately for easier access in interactive mode ???
+        if b_out.get("page_elements"):
+            page_elements_key = f"page_elements_{browser_step_id}"
+            self.ctx.globals[page_elements_key] = b_out.get("page_elements")
+        
+        if b_out.get("page_snapshot"):
+            page_snapshot_key = f"page_snapshot_{browser_step_id}"
+            self.ctx.globals[page_snapshot_key] = b_out.get("page_snapshot")
 
         if b_out.get("status") == "success":
             self.ctx.mark_step_completed(browser_step_id)
